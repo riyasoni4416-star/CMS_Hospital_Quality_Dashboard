@@ -1,9 +1,19 @@
+-- Create project schemas:
+-- raw   = original imported files
+-- stage = cleaned and standardized views
+-- mart  = reporting-ready views for Power BI
+
 CREATE SCHEMA IF NOT EXISTS raw;
 CREATE SCHEMA IF NOT EXISTS stage;
 CREATE SCHEMA IF NOT EXISTS mart;
+
+-- Drop existing raw tables so the script can be rerun cleanly
+
 DROP TABLE IF EXISTS raw.hospital_general_info;
 DROP TABLE IF EXISTS raw.timely_effective_care;
 DROP TABLE IF EXISTS raw.unplanned_hospital_visits;
+
+-- Raw hospital master file 
 
 CREATE TABLE raw.hospital_general_info (
     facility_id TEXT,
@@ -37,6 +47,8 @@ CREATE TABLE raw.hospital_general_info (
     te_group_footnote TEXT
 );
 
+-- Raw timely and effective care file
+
 CREATE TABLE raw.timely_effective_care (
     facility_id TEXT,
     facility_name TEXT,
@@ -55,6 +67,8 @@ CREATE TABLE raw.timely_effective_care (
     start_date TEXT,
     end_date TEXT
 );
+
+-- Raw unplanned hospital visits file
 
 CREATE TABLE raw.unplanned_hospital_visits (
     facility_id TEXT,
@@ -78,6 +92,8 @@ CREATE TABLE raw.unplanned_hospital_visits (
     start_date TEXT,
     end_date TEXT
 );
+
+-- Validation checks after CSV import
 
 DROP TABLE IF EXISTS raw.hospital_general_info;
 CREATE TABLE raw.hospital_general_info (
@@ -166,6 +182,9 @@ SELECT COUNT(*) AS hospital_general_rows FROM raw.hospital_general_info;
 SELECT COUNT(*) AS timely_effective_rows FROM raw.timely_effective_care;
 SELECT COUNT(*) AS unplanned_hospital_rows FROM raw.unplanned_hospital_visits;
 
+-- CMS Hospital Quality Dashboard
+-- Stage and mart layer build
+
 DROP VIEW IF EXISTS stage.hospital_general_clean CASCADE;
 DROP VIEW IF EXISTS stage.timely_effective_care_clean CASCADE;
 DROP VIEW IF EXISTS stage.unplanned_hospital_visits_clean CASCADE;
@@ -175,6 +194,8 @@ DROP VIEW IF EXISTS mart.readmission_measures CASCADE;
 DROP VIEW IF EXISTS mart.hospital_quality_overview CASCADE;
 DROP VIEW IF EXISTS mart.state_summary CASCADE;
 DROP VIEW IF EXISTS mart.data_quality_summary CASCADE;
+
+-- Stage view: cleaned hospital master data
 
 CREATE VIEW stage.hospital_general_clean AS
 SELECT
@@ -190,6 +211,9 @@ SELECT
     NULLIF(TRIM(hospital_ownership), '') AS hospital_ownership,
     NULLIF(TRIM(emergency_services), '') AS emergency_services,
     NULLIF(TRIM(meets_criteria_for_birthing_friendly_designation), '') AS birthing_friendly_designation,
+
+      -- Convert rating to numeric only when the value is usable.
+    
     CASE
         WHEN hospital_overall_rating IN ('Not Available', '') THEN NULL
         ELSE hospital_overall_rating::NUMERIC
@@ -221,6 +245,8 @@ SELECT
     NULLIF(TRIM(te_group_footnote), '') AS te_group_footnote
 FROM raw.hospital_general_info;
 
+-- Stage view: cleaned timely and effective care measures
+
 CREATE VIEW stage.timely_effective_care_clean AS
 SELECT
     TRIM(facility_id) AS facility_id,
@@ -229,12 +255,18 @@ SELECT
     NULLIF(TRIM(condition), '') AS condition,
     NULLIF(TRIM(measure_id), '') AS measure_id,
     NULLIF(TRIM(measure_name), '') AS measure_name,
+    
+ -- Convert score to numeric only if it looks like a valid number.
+    
     CASE
         WHEN score IN ('Not Available', 'No different than national benchmark', 'Number of Cases Too Small', '') THEN NULL
         WHEN score ~ '^[0-9]+(\.[0-9]+)?$' THEN score::NUMERIC
         ELSE NULL
     END AS score_numeric,
     NULLIF(TRIM(score), '') AS score_raw,
+
+     -- Convert sample size to numeric where valid.
+    
     CASE
         WHEN sample ~ '^[0-9]+(\.[0-9]+)?$' THEN sample::NUMERIC
         ELSE NULL
@@ -244,6 +276,8 @@ SELECT
     NULLIF(TRIM(start_date), '')::DATE AS start_date,
     NULLIF(TRIM(end_date), '')::DATE AS end_date
 FROM raw.timely_effective_care;
+
+-- Stage view: cleaned unplanned hospital visit measures
 
 CREATE VIEW stage.unplanned_hospital_visits_clean AS
 SELECT
@@ -283,6 +317,8 @@ SELECT
     NULLIF(TRIM(end_date), '')::DATE AS end_date
 FROM raw.unplanned_hospital_visits;
 
+-- Mart view: hospital dimension
+
 CREATE VIEW mart.hospital_dimension AS
 SELECT
     facility_id,
@@ -297,6 +333,8 @@ SELECT
     birthing_friendly_designation,
     hospital_overall_rating
 FROM stage.hospital_general_clean;
+
+-- Mart view: ED throughput measures
 
 CREATE VIEW mart.ed_throughput_measures AS
 SELECT
@@ -322,6 +360,8 @@ WHERE
     OR LOWER(COALESCE(t.condition, '')) LIKE '%emergency department%'
     OR LOWER(COALESCE(t.measure_name, '')) LIKE '%ed%';
 
+-- Mart view: readmission and return visit measures
+
 CREATE VIEW mart.readmission_measures AS
 SELECT
     u.facility_id,
@@ -345,6 +385,8 @@ SELECT
 FROM stage.unplanned_hospital_visits_clean u
 LEFT JOIN mart.hospital_dimension h
     ON u.facility_id = h.facility_id;
+
+-- Mart view: hospital quality overview
 
 CREATE VIEW mart.hospital_quality_overview AS
 WITH ed_agg AS (
@@ -395,6 +437,8 @@ LEFT JOIN ed_agg e
 LEFT JOIN readm_agg r
     ON h.facility_id = r.facility_id;
 
+-- Mart view: state summary
+
 CREATE VIEW mart.state_summary AS
 SELECT
     state,
@@ -407,6 +451,8 @@ SELECT
     SUM(worse_than_national_count) AS worse_than_national_count
 FROM mart.hospital_quality_overview
 GROUP BY state;
+
+-- Mart view: data quality summary
 
 CREATE VIEW mart.data_quality_summary AS
 SELECT
@@ -421,12 +467,20 @@ FROM mart.hospital_dimension h
 LEFT JOIN mart.hospital_quality_overview q
     ON h.facility_id = q.facility_id;
 
+-- CMS Hospital Quality Dashboard
+-- Validation queries
+-- Check the total number of hospitals in the hospital dimension.
 
 SELECT COUNT(*) AS total_hospitals
 FROM mart.hospital_dimension;
 
+-- Check how many distinct states are represented.
+
 SELECT COUNT(DISTINCT state) AS states_present
 FROM mart.hospital_dimension;
+
+
+-- Compare average hospital rating by hospital type.
 
 SELECT
     hospital_type,
@@ -436,6 +490,8 @@ FROM mart.hospital_dimension
 WHERE hospital_overall_rating IS NOT NULL
 GROUP BY hospital_type
 ORDER BY avg_rating DESC;
+
+-- Compare average ED score by state for states with at least 10 hospitals.
 
 SELECT
     state,
@@ -447,6 +503,8 @@ GROUP BY state
 HAVING COUNT(*) >= 10
 ORDER BY avg_ed_score DESC;
 
+-- Identify states with the highest number of measures worse than national.
+
 SELECT
     state,
     SUM(worse_than_national_count) AS worse_than_national_measures
@@ -454,10 +512,11 @@ FROM mart.hospital_quality_overview
 GROUP BY state
 ORDER BY worse_than_national_measures DESC;
 
+-- Summarize missingness in key reporting fields.
+
 SELECT
     SUM(missing_overall_rating_flag) AS hospitals_missing_rating,
     SUM(missing_ed_score_flag) AS hospitals_missing_ed_score,
     SUM(missing_readmission_score_flag) AS hospitals_missing_readmission_score,
     SUM(missing_emergency_services_flag) AS hospitals_missing_emergency_services
 FROM mart.data_quality_summary;
-
